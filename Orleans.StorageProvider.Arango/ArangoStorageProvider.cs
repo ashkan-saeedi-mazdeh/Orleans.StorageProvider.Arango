@@ -94,7 +94,7 @@ namespace Orleans.StorageProvider.Arango
 
                 if (result.State != null)
                 {
-                    grainState.State = JsonConvert.DeserializeObject((result.State as string), grainState.State.GetType(), settings);
+                    grainState.State = (result.State as JObject).ToObject(grainState.State.GetType());
                 }
                 else
                 {
@@ -113,6 +113,7 @@ namespace Orleans.StorageProvider.Arango
         private string ConvertGrainReferenceToDocumentKey(GrainReference grainReference)
         {
             var primaryKey = grainReference.ToKeyString();
+            
             primaryKey = primaryKey.Replace("GrainReference=", "GR:").Replace("+", "_");
             return primaryKey;
         }
@@ -141,7 +142,7 @@ namespace Orleans.StorageProvider.Arango
                 {
                     Id = primaryKey,
                     Revision = grainState.ETag,
-                    State = JsonConvert.SerializeObject(grainState.State, grainState.State.GetType(), settings)
+                    State = grainState.State  //JsonConvert.SerializeObject(grainState.State, grainState.State.GetType(), settings)
                 };
                 if (Log.IsVerbose)
                     Log.Info("writing {0} with type {1} and eTag {2}", primaryKey, grainType, grainState.ETag);
