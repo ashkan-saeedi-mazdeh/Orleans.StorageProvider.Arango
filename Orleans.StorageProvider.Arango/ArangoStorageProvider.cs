@@ -2,7 +2,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text;
+using Orleans.Serialization;
 using System.Threading.Tasks;
 using Orleans.Providers;
 using Orleans.Runtime;
@@ -15,17 +15,17 @@ namespace Orleans.StorageProvider.Arango
 {
     public class ArangoStorageProvider : IStorageProvider
     {
-        public ArangoDatabase Database { get; private set; }
+        public static ArangoDatabase Database { get; private set; }
         public Logger Log { get; private set; }
         public string Name { get; private set; }
         private List<ArangoDB.Client.Data.CreateCollectionResult> collectionsList;
         private bool waitForSync;
-        private JsonSerializerSettings settings;
+        private JsonSerializer settings;
         private static bool isInitialized = false;
 
         public Task Close()
         {
-            this.Database.Dispose();
+            Database.Dispose();
             return TaskDone.Done;
         }
 
@@ -39,8 +39,15 @@ namespace Orleans.StorageProvider.Arango
             var username = config.GetProperty("Username", "root");
             var password = config.GetProperty("Password", "password");
             waitForSync = config.GetBoolProperty("WaitForSync", true);
-            settings = Orleans.Serialization.OrleansJsonSerializer.GetDefaultSerializerSettings();
+
+            var grainRefConverter = new GrainReferenceConverter();
+
+            settings = new JsonSerializer();
             settings.DefaultValueHandling = DefaultValueHandling.Include;
+            settings.MissingMemberHandling = MissingMemberHandling.Ignore;
+            settings.ConstructorHandling = ConstructorHandling.AllowNonPublicDefaultConstructor;
+            settings.Converters.Add(grainRefConverter);
+
             if (!isInitialized)
             {
                 ArangoDatabase.ChangeSetting(s =>
@@ -50,11 +57,12 @@ namespace Orleans.StorageProvider.Arango
                     s.Credential = new NetworkCredential(username, password);
                     s.DisableChangeTracking = true;
                     s.WaitForSync = waitForSync;
+                    s.Serialization.Converters.Add(grainRefConverter);
                 });
                 isInitialized = true;
             }
-            this.Database = new ArangoDatabase();
-            collectionsList = await this.Database.ListCollectionsAsync();
+            Database = new ArangoDatabase();
+            collectionsList = await Database.ListCollectionsAsync();
         }
 
         private async Task CreateCollectionIfNeeded(bool waitForSync, string collectionName)
@@ -64,7 +72,7 @@ namespace Orleans.StorageProvider.Arango
 
                 if (!collectionsList.Any(x => x.Name == collectionName))
                 {
-                    var addedCollection = await this.Database.CreateCollectionAsync(collectionName, waitForSync: waitForSync);
+                    var addedCollection = await Database.CreateCollectionAsync(collectionName, waitForSync: waitForSync);
                     collectionsList.Add(addedCollection);
                 }
             }
@@ -85,7 +93,7 @@ namespace Orleans.StorageProvider.Arango
                     Log.Info("reading {0}", primaryKey);
 
 
-                var result = await this.Database.Collection(collectionName).DocumentAsync<GrainState>(primaryKey).ConfigureAwait(false);
+                var result = await Database.Collection(collectionName).DocumentAsync<GrainState>(primaryKey).ConfigureAwait(false);
                 Log.Info("is it null {0}", result == null);
                 if (null == result)
                 {
@@ -94,7 +102,7 @@ namespace Orleans.StorageProvider.Arango
 
                 if (result.State != null)
                 {
-                    grainState.State = (result.State as JObject).ToObject(grainState.State.GetType());
+                    grainState.State = (result.State as JObject).ToObject(grainState.State.GetType(), settings);
                 }
                 else
                 {
@@ -113,16 +121,16 @@ namespace Orleans.StorageProvider.Arango
         private string ConvertGrainReferenceToDocumentKey(GrainReference grainReference)
         {
             var primaryKey = grainReference.ToKeyString();
-            
+
             primaryKey = primaryKey.Replace("GrainReference=", "GR:").Replace("+", "_");
             return primaryKey;
         }
 
         private string ConvertGrainTypeToCollectionName(string grainType)
         {
-            
+
             var index = grainType.LastIndexOf(".");
-            
+
             string collectionName;
             if (index < 0)
                 collectionName = grainType;
@@ -149,12 +157,12 @@ namespace Orleans.StorageProvider.Arango
 
                 if (string.IsNullOrWhiteSpace(grainState.ETag))
                 {
-                    var result = await this.Database.Collection(collectionName).InsertAsync(document).ConfigureAwait(false);
+                    var result = await Database.Collection(collectionName).InsertAsync(document).ConfigureAwait(false);
                     grainState.ETag = result.Rev;
                 }
                 else
                 {
-                    var result = await this.Database.Collection(collectionName).UpdateByIdAsync(primaryKey, document).ConfigureAwait(false);
+                    var result = await Database.Collection(collectionName).UpdateByIdAsync(primaryKey, document).ConfigureAwait(false);
                     grainState.ETag = result.Rev;
                 }
             }
@@ -173,7 +181,7 @@ namespace Orleans.StorageProvider.Arango
                 await CreateCollectionIfNeeded(this.waitForSync, collectionName);
                 string primaryKey = ConvertGrainReferenceToDocumentKey(grainReference);
 
-                await this.Database.Collection(collectionName).RemoveByIdAsync(primaryKey).ConfigureAwait(false);
+                await Database.Collection(collectionName).RemoveByIdAsync(primaryKey).ConfigureAwait(false);
                 grainState.ETag = null;
             }
             catch (Exception ex)
@@ -181,6 +189,50 @@ namespace Orleans.StorageProvider.Arango
                 this.Log.Error(190002, "ArangoStorageProvider.ClearStateAsync()", ex);
                 throw new ArangoStorageException(ex.ToString());
             }
+        }
+    }
+
+    internal class GrainReferenceInfo
+    {
+        public string Key { get; set; }
+
+        public string Data { get; set; }
+    }
+
+    internal class GrainReferenceConverter : JsonConverter
+    {
+
+        static JsonSerializerSettings serializerSettings = OrleansJsonSerializer.GetDefaultSerializerSettings();
+
+        public override bool CanRead
+        {
+            get { return true; }
+        }
+
+        public override void WriteJson(JsonWriter writer, object value, JsonSerializer serializer)
+        {
+            var reference = (GrainReference)value;
+            string key = reference.ToKeyString();
+            var info = new GrainReferenceInfo
+            {
+                Key = key,
+                Data = JsonConvert.SerializeObject(value, serializerSettings)
+            };
+            serializer.Serialize(writer, info);
+        }
+
+        public override object ReadJson(JsonReader reader, Type objectType, object existingValue, JsonSerializer serializer)
+        {
+            var info = new GrainReferenceInfo();
+
+            serializer.Populate(reader, info);
+
+            return JsonConvert.DeserializeObject(info.Data, serializerSettings);
+        }
+
+        public override bool CanConvert(Type objectType)
+        {
+            return typeof(IGrain).IsAssignableFrom(objectType);
         }
     }
 }

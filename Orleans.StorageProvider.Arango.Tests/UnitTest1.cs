@@ -41,15 +41,12 @@ namespace Orleans.StorageProvider.Arango.Tests
         private static void InitSilo(string[] args)
         {
             var config = ClusterConfiguration.LocalhostPrimarySilo();
-            config.Globals.RegisterArangoStorageProvider("ARANGO", password:"");
-            siloHost = new SiloHost("",config);
-            
+            config.Globals.RegisterArangoStorageProvider("ARANGO", password: "password");
+            siloHost = new SiloHost("Primary", config);
+
             siloHost.InitializeOrleansSilo();
-            var ok = siloHost.StartOrleansSilo(false);
-            if (!ok)
-            {
-                throw new SystemException($"Failed to start Orleans silo '{siloHost.Name}' as a {siloHost.Type} node.");
-            }
+            var ok = siloHost.StartOrleansSilo();
+            if (!ok) throw new SystemException($"Failed to start Orleans silo '{siloHost.Name}' as a {siloHost.Type} node.");
         }
 
         [ClassInitialize]
